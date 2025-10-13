@@ -1,0 +1,16 @@
+
+# Web Framework
+fastapi
+uvicorn
+python-multipart
+
+# AI Services
+groq
+
+# Authentication
+python-jose[cryptography]
+passlib[bcrypt]
+
+# Utilities
+httpx
+python-dotenv
