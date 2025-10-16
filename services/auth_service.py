@@ -7,7 +7,7 @@ from fastapi import HTTPException, status
 # Constants
 SECRET_KEY = "your-secret-key-change-this-in-production"  # In production, use environment variable
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
+ACCESS_TOKEN_EXPIRE_MINUTES =10
 
 # Hardcoded credentials as per requirements
 HARDCODED_USERNAME = "admin"
