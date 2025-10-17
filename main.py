@@ -14,7 +14,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://54.206.20.174:5000",  # your hosted frontend EC2
+        "http://3.106.173.45:5000",  # your hosted frontend EC2
         "http://localhost:5000"        # optional for local dev
     ],
     allow_credentials=True,
