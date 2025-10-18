@@ -4,7 +4,6 @@ from typing import Dict, Any
 import os
 from dotenv import load_dotenv
 from groq import Groq
-from io import BytesIO
 
 load_dotenv()
 
@@ -33,13 +32,16 @@ class MeterService:
                             {
                                 "type": "text",
                                 "text": (
-                                    "You are given an image of a utility meter. "
-                                    "It may be an electricity meter (kWh), water meter, gas meter, or any other type. "
-                                    "Analyze the image and extract ONLY the numeric meter reading as it appears "
-                                    "(digits & decimal, include units if present, e.g., '37856.3 kWh', '08215 m³'). "
-                                    "If units are visible, return them as part of the value. If not, just return the number. "
-                                    "If the actual reading value is NOT visible or unclear, respond exactly with 'Not visible'. "
-                                    "Do NOT interpret, summarize, or provide any extra commentary. Only output the exact value as described."
+                                    "You are an OCR extractor specialized in utility meters (electricity kWh, water m³, gas, etc.).\n\n"
+                                    "Task:\n"
+                                    "- Extract the exact meter register reading as displayed.\n"
+                                    "- Include units if visible (e.g., '37856.3 kWh', '08215 m³'); otherwise return only the number.\n"
+                                    "- Preserve leading zeros and the decimal/comma separator exactly as shown.\n\n"
+                                    "Critically DO NOT return:\n"
+                                    "- Serial numbers, model/firmware IDs, barcodes/QR codes, dates/timestamps, CT ratios, tariff codes, voltage/current/power values, 'max demand' or diagnostics.\n"
+                                    "- Any text outside the main register display.\n\n"
+                                    "If any digit is unclear, the display is obstructed/blurred, or the reading is not visible, return exactly 'Not visible'.\n\n"
+                                    "Return format is JSON as instructed by the tool; do not add extra commentary."
                                 )
                             },
                             {
@@ -51,7 +53,9 @@ class MeterService:
                         ],
                     }
                 ],
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                model="meta-llama/llama-4-maverick-17b-128e-instruct",
+                temperature=0,
+                max_tokens=128,
                 response_format={
                     "type": "json_schema",
                     "json_schema": {
@@ -59,7 +63,7 @@ class MeterService:
                         "schema": {
                             "type": "object",
                             "properties": {
-                                "reading": {"type": ["string", "number", "null"]},
+                                "reading": {"type": ["string", "null"]},
                             },
                             "required": ["reading"],
                         },
@@ -87,31 +91,22 @@ class MeterService:
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
 
             validation_prompt = (
-                "You are an expert in analyzing utility meter images. "
-                "Your task is to carefully examine this meter image and validate the reading."
-                "\n\nSTRICT INSTRUCTIONS:"
-                "\n1. Check if the image is clear enough to read the meter display"
-                "\n2. If the image is blurry, noisy, dark, or the meter display is not clearly visible, return 'Not visible'"
-                "\n3. If the image is clear, extract the exact numeric meter reading (with units if visible)"
-                "\n4. Verify the reading by double-checking all digits carefully"
-                "\n5. Return ONLY the verified reading value (e.g., '37856.3 kWh', '08215', '1234.56'), your confidence IN PERCENTAGE (e.g., 97%, 83%),"
-                " and IF the reading is 'Not visible', ALSO RETURN the reason why it is not visible (e.g. blurry, incomplete display, obscured)."
-                "\n\nIMPORTANT:"
-                "\n- If ANY digit is unclear or uncertain, return 'Not visible'"
-                "\n- If the meter display is partially visible, return 'Not visible'"
-                "\n- Only return a reading if you are HIGHLY CONFIDENT it is 100% accurate"
-                "\n- Do not include any explanations, comments, or extra text except for the 'reason' if 'Not visible'"
-                "\n- THE MAXIMUM CONFIDENCE YOU CAN RETURN IS 97% (DO NOT RETURN CONFIDENCE HIGHER THAN 97%)"
-                "\n\nReturn JSON: {'final_reading': '', 'confidence': '', 'reason': ''} "
-                "where confidence is a percentage as a string (e.g. '95%'), and reason is required ONLY if final_reading is 'Not visible'."
+                "You are validating a utility meter reading from an image.\n\n"
+                "Instructions:\n"
+                "1) If the main register reading is not fully legible or any digit is uncertain → final_reading = 'Not visible' and provide a brief reason.\n"
+                "2) Otherwise, return the exact reading string as displayed (keep leading zeros, punctuation, and units if visible).\n"
+                "3) Ignore serial numbers, dates, CT ratios, tariffs, diagnostic values, and anything outside the main register.\n\n"
+                "Constraints:\n"
+                "- confidence is a percentage string like '83%'. Maximum allowed is '97%'.\n"
+                "- If final_reading == 'Not visible', reason is required.\n\n"
+                "Return JSON only: {""final_reading"": ""..."", ""confidence"": ""..."", ""reason"": ""...""}"
             )
 
             if initial_reading:
                 validation_prompt += (
                     f"\n\nPrevious reading extracted: {initial_reading}. "
-                    "Please verify if this is correct and provide a confidence (in percentage, max 97%). "
-                    "If you return 'Not visible', also include a brief reason. "
-                    "Output JSON: {'final_reading': <value>, 'confidence': <percentage string like \"97%\">, 'reason': <required if Not visible>}"
+                    "Please verify correctness and provide confidence (percentage string, max 97%). "
+                    "If 'Not visible', include a brief reason."
                 )
 
             chat_completion = self.client.chat.completions.create(
@@ -132,7 +127,9 @@ class MeterService:
                         ],
                     }
                 ],
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                model="meta-llama/llama-4-maverick-17b-128e-instruct",
+                temperature=0,
+                max_tokens=160,
                 response_format={
                     "type": "json_schema",
                     "json_schema": {
