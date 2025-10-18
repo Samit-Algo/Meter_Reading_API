@@ -24,6 +24,8 @@ class MeterService:
         - Resize so the longer side <= 1280 px (maintain aspect ratio)
         - Use quality ~75 with subsampling for strong size reduction
         - Strip metadata
+        Additionally, ensure the final JPEG is <= 250KB by adaptively lowering
+        quality and, if necessary, further downscaling dimensions.
         """
         try:
             # Try HEIF decode first (iPhone HEIC)
@@ -38,18 +40,51 @@ class MeterService:
             if img.mode not in ("RGB", "L"):
                 img = img.convert("RGB")
 
-            # Resize: longest side to 1280px
+            # Initial resize: longest side to 1280px
             max_side = 1280
             w, h = img.size
-            scale = min(1.0, max_side / float(max(w, h)))
-            if scale < 1.0:
-                new_size = (int(w * scale), int(h * scale))
+            scale_to_max = min(1.0, max_side / float(max(w, h)))
+            if scale_to_max < 1.0:
+                new_size = (int(w * scale_to_max), int(h * scale_to_max))
                 img = img.resize(new_size, Image.LANCZOS)
 
-            # Save as JPEG with quality 75, subsampling 2, no EXIF
-            out = io.BytesIO()
-            img.save(out, format="JPEG", quality=75, optimize=True, subsampling=2)
-            return out.getvalue()
+            # Enforce target size <= 250KB with adaptive quality/dimension reduction
+            target_bytes = 250 * 1024
+            min_quality = 35
+            max_quality = 80
+            quality_step = 5
+
+            current_img = img
+            best_bytes = None  # keep the smallest attempt in case target is unreachable
+            long_side_min = 320  # avoid shrinking below this unless absolutely necessary
+
+            while True:
+                # Try qualities from high to low for the current dimensions
+                q = max_quality
+                while q >= min_quality:
+                    out = io.BytesIO()
+                    current_img.save(out, format="JPEG", quality=q, optimize=True, subsampling=2)
+                    data = out.getvalue()
+                    if len(data) <= target_bytes:
+                        return data
+                    if best_bytes is None or len(data) < len(best_bytes):
+                        best_bytes = data
+                    q -= quality_step
+
+                # If still too big at min quality, downscale dimensions and retry
+                w, h = current_img.size
+                if max(w, h) <= long_side_min:
+                    # Can't reasonably downscale further; return best effort
+                    return best_bytes if best_bytes is not None else image_bytes
+
+                # Reduce size modestly to preserve readability while shrinking bytes
+                downscale_factor = 0.85 if max(w, h) > 640 else 0.9
+                new_w = max(1, int(w * downscale_factor))
+                new_h = max(1, int(h * downscale_factor))
+                if (new_w, new_h) == (w, h):
+                    return best_bytes if best_bytes is not None else image_bytes
+                current_img = current_img.resize((new_w, new_h), Image.LANCZOS)
+
         except Exception:
             # On failure, return original bytes
             return image_bytes
