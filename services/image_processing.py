@@ -95,11 +95,17 @@ class MeterService:
         along with a confidence percentage for that reading.
         """
         try:
+            vv = len(image_bytes)
+            print("Image bytes length: ")
+            # vv in kb
+            print(vv/1024) #this will print the image bytes length in kb
             # Compress like WhatsApp, then encode to base64
             compressed = self._compress_like_whatsapp(image_bytes)
             base64_image = base64.b64encode(compressed).decode('utf-8')
 
-           
+            dddd = len(compressed)
+            print("After Compressed bytes length: ")
+            print(dddd/1024) #this will print the compressed bytes length in kb
 
             chat_completion = self.client.chat.completions.create(
                 messages=[
