@@ -1,9 +1,12 @@
 import base64
+import io
 import json
 from typing import Dict, Any
 import os
 from dotenv import load_dotenv
 from groq import Groq
+from PIL import Image
+import pillow_heif
 
 load_dotenv()
 
@@ -13,14 +16,53 @@ class MeterService:
         self.api_key = os.getenv("GROQ_API_KEY")
         self.client = Groq(api_key=self.api_key)
 
+    def _compress_like_whatsapp(self, image_bytes: bytes) -> bytes:
+        """
+        Compress image in a WhatsApp-like manner:
+        - Decode HEIC/HEIF if needed
+        - Convert to JPEG
+        - Resize so the longer side <= 1280 px (maintain aspect ratio)
+        - Use quality ~75 with subsampling for strong size reduction
+        - Strip metadata
+        """
+        try:
+            # Try HEIF decode first (iPhone HEIC)
+            try:
+                heif = pillow_heif.read_heif(image_bytes)
+                img = Image.frombytes(heif.mode, heif.size, heif.data)
+            except Exception:
+                # Fallback to PIL open
+                img = Image.open(io.BytesIO(image_bytes))
+
+            # Convert to RGB for JPEG
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+
+            # Resize: longest side to 1280px
+            max_side = 1280
+            w, h = img.size
+            scale = min(1.0, max_side / float(max(w, h)))
+            if scale < 1.0:
+                new_size = (int(w * scale), int(h * scale))
+                img = img.resize(new_size, Image.LANCZOS)
+
+            # Save as JPEG with quality 75, subsampling 2, no EXIF
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=75, optimize=True, subsampling=2)
+            return out.getvalue()
+        except Exception:
+            # On failure, return original bytes
+            return image_bytes
+
     async def groq_process_meter_image_from_bytes(self, image_bytes: bytes) -> Dict[str, Any]:
         """
         Process any type of meter image (electricity, water, gas, etc.) and return the numeric meter reading (e.g., kWh, cubic meters)
         along with a confidence percentage for that reading.
         """
         try:
-            # Encode image to base64
-            base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            # Compress like WhatsApp, then encode to base64
+            compressed = self._compress_like_whatsapp(image_bytes)
+            base64_image = base64.b64encode(compressed).decode('utf-8')
 
            
 
@@ -87,8 +129,9 @@ class MeterService:
         NOTE: The max confidence returned will be 97%.
         """
         try:
-            # Encode image to base64
-            base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            # Compress like WhatsApp, then encode to base64
+            compressed = self._compress_like_whatsapp(image_bytes)
+            base64_image = base64.b64encode(compressed).decode('utf-8')
 
             validation_prompt = (
                 "You are validating a utility meter reading from an image.\n\n"

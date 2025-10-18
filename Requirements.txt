@@ -14,3 +14,5 @@ passlib[bcrypt]
 # Utilities
 httpx
 python-dotenv
+Pillow
+pillow-heif
