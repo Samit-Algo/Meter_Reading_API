@@ -5,8 +5,8 @@ uvicorn
 python-multipart
 
 # AI Services
+requests
 groq
-
 # Authentication
 python-jose[cryptography]
 passlib[bcrypt]
