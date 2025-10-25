@@ -4,7 +4,7 @@ import json
 from typing import Dict, Any
 import os
 from dotenv import load_dotenv
-import requests
+from groq import Groq
 from PIL import Image
 import pillow_heif
 from datetime import datetime
@@ -14,13 +14,12 @@ load_dotenv()
 
 class MeterService:
     def __init__(self):
-        # Ollama settings
-        self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        self.model_name = "llava:7b"
-        # Default model choices; can be overridden per-call (all using llava now)
-        self.default_extract_model = "llava:7b"
-        self.default_validate_model = "llava:7b"
-        self.default_scout_model = "llava:7b"
+        self.api_key = os.getenv("GROQ_API_KEY")
+        self.client = Groq(api_key=self.api_key)
+        # Default model choices; can be overridden per-call
+        self.default_extract_model = "meta-llama/llama-4-maverick-17b-128e-instruct"
+        self.default_validate_model = "meta-llama/llama-4-maverick-17b-128e-instruct"
+        self.default_scout_model = "meta-llama/llama-4-scout-17b-16e-instruct"
 
     def _normalize_reading_str(self, value: Any) -> str:
         """
@@ -70,34 +69,30 @@ class MeterService:
 
     def _encode_image_for_model(self, image_bytes: bytes) -> str:
         """
-        Compress then Base64-encode the image for Ollama vision model usage.
+        Compress then Base64-encode the image for Groq image_url usage.
         """
         compressed = self._compress_like_whatsapp(image_bytes)
         return base64.b64encode(compressed).decode('utf-8')
 
-    def _ollama_vision_chat(self, *, model: str, prompt: str, base64_image: str, temperature: float = 0) -> str:
+    def _groq_json_chat(self, *, model: str, messages: list, schema_name: str, schema_obj: dict, temperature: float = 0, max_tokens: int = 160) -> Dict[str, Any]:
         """
-        Call Ollama API with vision model and return the response text.
+        Call Groq chat.completions with a JSON schema and return parsed JSON.
         """
-        url = f"{self.ollama_base_url}/api/generate"
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "images": [base64_image],
-            "stream": False,
-            "options": {
-                "temperature": temperature,
-            }
-        }
-        
-        try:
-            response = requests.post(url, json=payload, timeout=120)
-            response.raise_for_status()
-            result = response.json()
-            return result.get("response", "").strip()
-        except Exception as e:
-            print(f"Ollama API error: {e}")
-            raise
+        chat_completion = self.client.chat.completions.create(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name,
+                    "schema": schema_obj,
+                },
+            },
+        )
+        response_text = chat_completion.choices[0].message.content.strip()
+        return json.loads(response_text)
 
     async def _extract_reading(self, base64_image: str, model: str) -> Any:
         """
@@ -105,46 +100,43 @@ class MeterService:
         Returns the raw reading string or None.
         """
         try:
-            prompt = (
-                "You are an OCR extractor specialized in utility meters (electricity kWh, water m³, gas, etc.).\n\n"
-                "Task:\n"
-                "- Extract the exact meter register reading as displayed.\n"
-                "- Include units if visible (e.g., '37856.3 kWh', '08215 m³'); otherwise return only the number.\n"
-                "- Preserve leading zeros and the decimal/comma separator exactly as shown.\n\n"
-                "If any digit is unclear, or the reading is not visible, respond with 'null'.\n\n"
-                "IMPORTANT: Respond with ONLY a JSON object in this exact format: {\"reading\": \"your_reading_here\"} or {\"reading\": null}\n"
-                "Do not include any other text or explanation."
-            )
-            
-            response_text = self._ollama_vision_chat(
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "You are an OCR extractor specialized in utility meters (electricity kWh, water m³, gas, etc.).\n\n"
+                                "Task:\n"
+                                "- Extract the exact meter register reading as displayed.\n"
+                                "- Include units if visible (e.g., '37856.3 kWh', '08215 m³'); otherwise return only the number.\n"
+                                "- Preserve leading zeros and the decimal/comma separator exactly as shown.\n\n"
+                                "If any digit is unclear, or the reading is not visible, set reading to null."
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
+                        },
+                    ],
+                }
+            ]
+            schema = {
+                "type": "object",
+                "properties": {"reading": {"type": ["string", "null"]}},
+                "required": ["reading"],
+            }
+            data = self._groq_json_chat(
                 model=model,
-                prompt=prompt,
-                base64_image=base64_image,
+                messages=messages,
+                schema_name="meter_reading_only",
+                schema_obj=schema,
                 temperature=0,
+                max_tokens=128,
             )
-            
-            # Try to parse JSON from response
-            # Sometimes models add extra text, so we'll try to extract JSON
-            try:
-                # Look for JSON in the response
-                start_idx = response_text.find('{')
-                end_idx = response_text.rfind('}') + 1
-                if start_idx != -1 and end_idx > start_idx:
-                    json_str = response_text[start_idx:end_idx]
-                    data = json.loads(json_str)
-                    return data.get("reading")
-                else:
-                    # Try parsing the whole response as JSON
-                    data = json.loads(response_text)
-                    return data.get("reading")
-            except:
-                # If JSON parsing fails, try to extract the reading directly
-                if "null" in response_text.lower() or "not visible" in response_text.lower():
-                    return None
-                # Return the cleaned response as the reading
-                return response_text.strip()
-        except Exception as e:
-            print(f"Error extracting reading: {e}")
+            return data.get("reading")
+        except Exception:
             return None
 
     async def _validate_via_model(self, base64_image: str, initial_reading: Any, model: str) -> Dict[str, Any]:
@@ -161,52 +153,44 @@ class MeterService:
             "Constraints:\n"
             "- confidence is a percentage string like '83%'. Maximum allowed is '97%'.\n"
             "- If final_reading == 'Not visible', reason is required.\n\n"
+            "Return JSON only: {\"final_reading\": \"...\", \"confidence\": \"...\", \"reason\": \"...\"}"
         )
         if initial_reading:
             validation_prompt += (
                 f"\n\nPrevious reading extracted: {initial_reading}. "
                 "Please verify correctness and provide confidence (percentage string, max 97%). "
-                "If 'Not visible', include a brief reason.\n\n"
+                "If 'Not visible', include a brief reason."
             )
-        
-        validation_prompt += (
-            "IMPORTANT: Respond with ONLY a JSON object in this exact format:\n"
-            "{\"final_reading\": \"...\", \"confidence\": \"...%\", \"reason\": \"...\"}\n"
-            "Do not include any other text or explanation."
-        )
 
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": validation_prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                ],
+            }
+        ]
+        schema = {
+            "type": "object",
+            "properties": {
+                "final_reading": {"type": "string"},
+                "confidence": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["final_reading", "confidence"],
+        }
         try:
-            response_text = self._ollama_vision_chat(
+            data = self._groq_json_chat(
                 model=model,
-                prompt=validation_prompt,
-                base64_image=base64_image,
+                messages=messages,
+                schema_name="validated_reading_with_confidence_and_reason",
+                schema_obj=schema,
                 temperature=0,
+                max_tokens=160,
             )
-            
-            # Try to parse JSON from response
-            try:
-                # Look for JSON in the response
-                start_idx = response_text.find('{')
-                end_idx = response_text.rfind('}') + 1
-                if start_idx != -1 and end_idx > start_idx:
-                    json_str = response_text[start_idx:end_idx]
-                    data = json.loads(json_str)
-                else:
-                    data = json.loads(response_text)
-                
-                # Ensure required fields exist
-                if "final_reading" not in data:
-                    data["final_reading"] = "Not visible"
-                if "confidence" not in data:
-                    data["confidence"] = "0%"
-                    
-                return data
-            except:
-                # If JSON parsing fails completely, return default
-                return {"final_reading": "Not visible", "confidence": "0%", "reason": "Failed to parse validation response"}
-                
-        except Exception as e:
-            print(f"Validation error: {e}")
+            return data
+        except Exception:
             return {"final_reading": "Not visible", "confidence": "0%", "reason": "Validation error"}
 
     def _compress_like_whatsapp(self, image_bytes: bytes) -> bytes:
@@ -310,7 +294,7 @@ class MeterService:
                 pass
             return image_bytes
 
-    async def process_meter_image_from_bytes(self, image_bytes: bytes, *, extract_model: str = None, validate_model: str = None, scout_model: str = None) -> Dict[str, Any]:
+    async def groq_process_meter_image_from_bytes(self, image_bytes: bytes, *, extract_model: str = None, validate_model: str = None, scout_model: str = None) -> Dict[str, Any]:
         """
         Process any type of meter image (electricity, water, gas, etc.) and return the numeric meter reading (e.g., kWh, cubic meters)
         along with a confidence percentage for that reading.
